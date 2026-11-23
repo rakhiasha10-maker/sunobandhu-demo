@@ -132,29 +132,29 @@ def fetch_songs(query=''):
     conn = get_db_connection()
     sql = """
         SELECT s.song_id, s.song_title_hindi, s.song_title_english, s.release_year, s.era, s.youtube_link,
-               GROUP_CONCAT(DISTINCT m.movie_name_hindi) AS movie_name,
+               COALESCE(m.movie_name_hindi, s.movie_name_hindi) AS movie_name,
                GROUP_CONCAT(DISTINCT p.name_english) AS artists
         FROM songs s
-        LEFT JOIN song_movie_links sml ON s.song_id = sml.song_id
-        LEFT JOIN movies m ON sml.movie_id = m.movie_id
-        LEFT JOIN song_person_links spl ON s.song_id = spl.song_id
-        LEFT JOIN persons p ON spl.person_id = p.person_id
+        LEFT JOIN movies m ON s.movie_id = m.movie_id
+        LEFT JOIN song_persons sp ON s.song_id = sp.song_id
+        LEFT JOIN persons p ON sp.person_id = p.person_id
     """
     params = []
     if query:
         sql += """
             WHERE s.song_title_hindi LIKE ? OR s.song_title_english LIKE ?
-               OR m.movie_name_hindi LIKE ? OR p.name_english LIKE ?
-               OR s.first_letter_hindi = ? OR s.first_letter_english = ?
+               OR s.opening_lines_hindi LIKE ? OR s.opening_lines_english LIKE ?
+               OR s.movie_name_hindi LIKE ? OR m.movie_name_hindi LIKE ?
+               OR p.name_english LIKE ? OR p.name_hindi LIKE ?
         """
         like_q = f"%{query}%"
-        params = [like_q, like_q, like_q, like_q, query.strip(), query.strip().upper()]
+        params = [like_q, like_q, like_q, like_q, like_q, like_q, like_q, like_q]
     
     sql += " GROUP BY s.song_id ORDER BY s.song_id ASC LIMIT 24"
     songs = conn.execute(sql, params).fetchall()
     conn.close()
     return songs
-
+    
 @app.route('/')
 def root():
     return redirect('/hi/')
