@@ -133,7 +133,7 @@ def fetch_songs(query=''):
     sql = """
         SELECT s.song_id, s.song_title_hindi, s.song_title_english, s.release_year, s.era, s.youtube_link,
                GROUP_CONCAT(DISTINCT m.movie_name_hindi) AS movie_name,
-               GROUP_CONCAT(DISTINCT p.name) AS artists
+               GROUP_CONCAT(DISTINCT p.name_english) AS artists
         FROM songs s
         LEFT JOIN song_movie_links sml ON s.song_id = sml.song_id
         LEFT JOIN movies m ON sml.movie_id = m.movie_id
@@ -144,7 +144,7 @@ def fetch_songs(query=''):
     if query:
         sql += """
             WHERE s.song_title_hindi LIKE ? OR s.song_title_english LIKE ?
-               OR m.movie_name_hindi LIKE ? OR p.name LIKE ?
+               OR m.movie_name_hindi LIKE ? OR p.name_english LIKE ?
                OR s.first_letter_hindi = ? OR s.first_letter_english = ?
         """
         like_q = f"%{query}%"
