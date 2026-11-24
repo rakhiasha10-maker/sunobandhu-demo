@@ -1,13 +1,35 @@
 from flask import Flask, request, redirect, render_template_string
 import sqlite3
+import unicodedata
+import re
 
 app = Flask(__name__)
 DB_PATH = 'sunobandhu.db'
 
+def normalize_hindi(text):
+    if not text:
+        return ""
+    text = unicodedata.normalize('NFC', str(text)).lower().strip()
+    # नुक़्ता हटाना (ज़ -> ज, फ़ -> फ, क़ -> क, ख़ -> ख, ग़ -> ग, ड़ -> ड, ढ़ -> ढ)
+    nukta_map = {'क़': 'क', 'ख़': 'ख', 'ग़': 'ग', 'ज़': 'ज', 'ड़': 'ड', 'ढ़': 'ढ', 'फ़': 'फ'}
+    for k, v in nukta_map.items():
+        text = text.replace(k, v)
+    # पंचमाक्षर (आधा न/म/ङ/ञ/ण) को अनुस्वार (ं) के समान बनाना ताकि 'जिंदगी' और 'ज़िन्दगी' मैच हों
+    text = re.sub(r'[ङ्ञ्ण्न्म्]', 'ं', text)
+    return text
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.create_function("NORM_HI", 1, normalize_hindi)
     return conn
+
+def get_table_columns(conn, table_name):
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {c[1] for c in cols}
+    except:
+        return set()
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -44,6 +66,7 @@ HTML_TEMPLATE = """
         .song-card { background: white; padding: 16px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
         .song-id { font-size: 0.75rem; color: #64748b; font-family: monospace; }
         .song-title { font-size: 1.15rem; font-weight: bold; color: #0f172a; margin: 4px 0; }
+        .song-lines { font-size: 0.88rem; color: #334155; margin: 6px 0; font-style: italic; }
         .song-meta { font-size: 0.9rem; color: #475569; margin-top: 6px; }
         .badge { display: inline-block; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; margin-top: 8px; }
         .yt-link { display: inline-block; margin-top: 10px; color: #dc2626; font-weight: 600; text-decoration: none; font-size: 0.9rem; }
@@ -67,7 +90,7 @@ HTML_TEMPLATE = """
         <h1>{{ 'ज्ञान और मनोरंजन का संगम' if lang == 'hi' else 'Where Knowledge Meets Entertainment' }}</h1>
         <p>{{ 'साहित्य, सामान्य ज्ञान, संगीत और सदाबहार गीतों की दुनिया में आपका स्वागत है।' if lang == 'hi' else 'Welcome to a curated world of literature, general knowledge, music, and evergreen songs.' }}</p>
         <form class="search-box" action="/{{ lang }}/" method="get">
-            <input type="text" name="q" value="{{ query }}" placeholder="{{ 'गीत, फिल्म या गायक खोजें...' if lang == 'hi' else 'Search song, movie, or singer...' }}">
+            <input type="text" name="q" value="{{ query }}" placeholder="{{ 'गीत, मुखड़ा, फिल्म या गायक खोजें...' if lang == 'hi' else 'Search song, lyrics, movie, or singer...' }}">
             <button type="submit">{{ 'खोजें' if lang == 'hi' else 'Search' }}</button>
         </form>
     </div>
@@ -94,9 +117,12 @@ HTML_TEMPLATE = """
                     <div class="song-title">
                         {{ song['song_title_hindi'] if (lang == 'hi' and song['song_title_hindi']) else (song['song_title_english'] or song['song_title_hindi']) }}
                     </div>
+                    <div class="song-lines">
+                        {{ song['opening_lines_hindi'] if (lang == 'hi' and song['opening_lines_hindi']) else (song['opening_lines_english'] or '') }}
+                    </div>
                     <div class="song-meta">
                         <strong>{{ 'फिल्म:' if lang == 'hi' else 'Movie:' }}</strong> {{ song['movie_name'] or '-' }}<br>
-                        <strong>{{ 'कलाकार:' if lang == 'hi' else 'Artists:' }}</strong> {{ song['artists'] or '-' }}
+                        <strong>{{ 'गायक:' if lang == 'hi' else 'Singer:' }}</strong> {{ song['singer'] or '-' }}
                     </div>
                     {% if song['era'] %}
                         <span class="badge">{{ song['era'] }}</span>
@@ -130,31 +156,40 @@ HTML_TEMPLATE = """
 
 def fetch_songs(query=''):
     conn = get_db_connection()
+    song_cols = get_table_columns(conn, 'songs')
+    
+    # सीधे songs टेबल के सभी उपलब्ध हिंदी और अंग्रेजी कॉलम्स में सुरक्षित खोज
+    search_fields = [
+        'song_title_hindi', 'song_title_english', 'alternate_title',
+        'opening_lines_hindi', 'opening_lines_english',
+        'movie_name_hindi', 'singer', 'lyricist', 'music_director', 'actor', 'actress'
+    ]
+    valid_fields = [f for f in search_fields if f in song_cols]
+
     sql = """
-        SELECT s.song_id, s.song_title_hindi, s.song_title_english, s.release_year, s.era, s.youtube_link,
-               COALESCE(m.movie_name_hindi, s.movie_name_hindi) AS movie_name,
-               GROUP_CONCAT(DISTINCT p.name_english) AS artists
-        FROM songs s
-        LEFT JOIN movies m ON s.movie_id = m.movie_id
-        LEFT JOIN song_persons sp ON s.song_id = sp.song_id
-        LEFT JOIN persons p ON sp.person_id = p.person_id
+        SELECT song_id, song_title_hindi, song_title_english,
+               opening_lines_hindi, opening_lines_english,
+               release_year, era, youtube_link,
+               movie_name_hindi AS movie_name, singer
+        FROM songs
     """
     params = []
     if query:
-        sql += """
-            WHERE s.song_title_hindi LIKE ? OR s.song_title_english LIKE ?
-               OR s.opening_lines_hindi LIKE ? OR s.opening_lines_english LIKE ?
-               OR s.movie_name_hindi LIKE ? OR m.movie_name_hindi LIKE ?
-               OR p.name_english LIKE ? OR p.name_hindi LIKE ?
-        """
-        like_q = f"%{query}%"
-        params = [like_q, like_q, like_q, like_q, like_q, like_q, like_q, like_q]
-    
-    sql += " GROUP BY s.song_id ORDER BY s.song_id ASC LIMIT 24"
+        norm_q = f"%{normalize_hindi(query)}%"
+        raw_q = f"%{query.strip()}%"
+        conditions = []
+        for field in valid_fields:
+            conditions.append(f"NORM_HI({field}) LIKE ?")
+            params.append(norm_q)
+            conditions.append(f"{field} LIKE ?")
+            params.append(raw_q)
+        sql += " WHERE " + " OR ".join(conditions)
+
+    sql += " ORDER BY song_id ASC LIMIT 30"
     songs = conn.execute(sql, params).fetchall()
     conn.close()
     return songs
-    
+
 @app.route('/')
 def root():
     return redirect('/hi/')
