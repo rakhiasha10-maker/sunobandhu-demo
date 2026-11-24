@@ -10,18 +10,33 @@ def normalize_hindi(text):
     if not text:
         return ""
     text = unicodedata.normalize('NFC', str(text)).lower().strip()
-    # नुक़्ता हटाना (ज़ -> ज, फ़ -> फ, क़ -> क, ख़ -> ख, ग़ -> ग, ड़ -> ड, ढ़ -> ढ)
+    # केवल नुक़्ता हटाना (ज़ -> ज, फ़ -> फ आदि) — मात्राओं या हलंत को न छेड़ें
     nukta_map = {'क़': 'क', 'ख़': 'ख', 'ग़': 'ग', 'ज़': 'ज', 'ड़': 'ड', 'ढ़': 'ढ', 'फ़': 'फ'}
     for k, v in nukta_map.items():
         text = text.replace(k, v)
-    # पंचमाक्षर (आधा न/म/ङ/ञ/ण) को अनुस्वार (ं) के समान बनाना ताकि 'जिंदगी' और 'ज़िन्दगी' मैच हों
-    text = re.sub(r'[ङ्ञ्ण्न्म्]', 'ं', text)
+    # आधा न/म (जैसे ज़िन्दगी -> जिंदगी) को सामान्य अनुस्वार (ं) के बराबर करना
+    text = text.replace('न्', 'ं').replace('म्', 'ं')
     return text
+
+def has_exact_word(text, word):
+    if not text or not word:
+        return 0
+    norm_t = normalize_hindi(text)
+    norm_w = normalize_hindi(word)
+    # विराम चिह्नों को स्पेस में बदलकर पूरे शब्द (Exact Word) की जाँच करना
+    cleaned_t = re.sub(r'[,।\|\-\(\)\[\]\!\?\"\'~0-9]', ' ', norm_t)
+    words_list = cleaned_t.split()
+    if norm_w in words_list:
+        return 2  # पूरा शब्द हूबहू मिला (जैसे 'रात')
+    if norm_w in norm_t:
+        return 1  # शब्द का हिस्सा मिला (जैसे 'रातों')
+    return 0
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.create_function("NORM_HI", 1, normalize_hindi)
+    conn.create_function("WORD_SCORE", 2, has_exact_word)
     return conn
 
 def get_table_columns(conn, table_name):
@@ -157,8 +172,7 @@ HTML_TEMPLATE = """
 def fetch_songs(query=''):
     conn = get_db_connection()
     song_cols = get_table_columns(conn, 'songs')
-    
-    # सीधे songs टेबल के सभी उपलब्ध हिंदी और अंग्रेजी कॉलम्स में सुरक्षित खोज
+
     search_fields = [
         'song_title_hindi', 'song_title_english', 'alternate_title',
         'opening_lines_hindi', 'opening_lines_english',
@@ -166,26 +180,45 @@ def fetch_songs(query=''):
     ]
     valid_fields = [f for f in search_fields if f in song_cols]
 
-    sql = """
-        SELECT song_id, song_title_hindi, song_title_english,
-               opening_lines_hindi, opening_lines_english,
-               release_year, era, youtube_link,
-               movie_name_hindi AS movie_name, singer
-        FROM songs
-    """
-    params = []
     if query:
-        norm_q = f"%{normalize_hindi(query)}%"
-        raw_q = f"%{query.strip()}%"
+        q_clean = query.strip()
+        norm_q = f"%{normalize_hindi(q_clean)}%"
+        raw_q = f"%{q_clean}%"
+        
         conditions = []
+        where_params = []
         for field in valid_fields:
             conditions.append(f"NORM_HI({field}) LIKE ?")
-            params.append(norm_q)
+            where_params.append(norm_q)
             conditions.append(f"{field} LIKE ?")
-            params.append(raw_q)
-        sql += " WHERE " + " OR ".join(conditions)
+            where_params.append(raw_q)
 
-    sql += " ORDER BY song_id ASC LIMIT 30"
+        # सटीक पूरे शब्द (Exact Word) को सबसे ऊपर दिखाने के लिए स्कोर जोड़ना
+        sql = f"""
+            SELECT song_id, song_title_hindi, song_title_english,
+                   opening_lines_hindi, opening_lines_english,
+                   release_year, era, youtube_link,
+                   movie_name_hindi AS movie_name, singer,
+                   (WORD_SCORE(song_title_hindi, ?) * 3 +
+                    WORD_SCORE(opening_lines_hindi, ?) * 2 +
+                    WORD_SCORE(song_title_english, ?) +
+                    WORD_SCORE(opening_lines_english, ?)) AS relevance
+            FROM songs
+            WHERE {" OR ".join(conditions)}
+            ORDER BY relevance DESC, song_id ASC
+        """
+        params = [q_clean, q_clean, q_clean, q_clean] + where_params
+    else:
+        sql = """
+            SELECT song_id, song_title_hindi, song_title_english,
+                   opening_lines_hindi, opening_lines_english,
+                   release_year, era, youtube_link,
+                   movie_name_hindi AS movie_name, singer
+            FROM songs
+            ORDER BY song_id ASC LIMIT 30
+        """
+        params = []
+
     songs = conn.execute(sql, params).fetchall()
     conn.close()
     return songs
