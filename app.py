@@ -10,41 +10,24 @@ def normalize_hindi(text):
     if not text:
         return ""
     text = unicodedata.normalize('NFC', str(text)).lower().strip()
-    # केवल नुक़्ता हटाना (ज़ -> ज, फ़ -> फ आदि) — मात्राओं या हलंत को न छेड़ें
     nukta_map = {'क़': 'क', 'ख़': 'ख', 'ग़': 'ग', 'ज़': 'ज', 'ड़': 'ड', 'ढ़': 'ढ', 'फ़': 'फ'}
     for k, v in nukta_map.items():
         text = text.replace(k, v)
-    # आधा न/म (जैसे ज़िन्दगी -> जिंदगी) को सामान्य अनुस्वार (ं) के बराबर करना
     text = text.replace('न्', 'ं').replace('म्', 'ं')
     return text
 
-def has_exact_word(text, word):
-    if not text or not word:
-        return 0
+def is_devanagari(text):
+    return bool(re.search(r'[\u0900-\u097F]', str(text)))
+
+def extract_words(text):
     norm_t = normalize_hindi(text)
-    norm_w = normalize_hindi(word)
-    # विराम चिह्नों को स्पेस में बदलकर पूरे शब्द (Exact Word) की जाँच करना
-    cleaned_t = re.sub(r'[,।\|\-\(\)\[\]\!\?\"\'~0-9]', ' ', norm_t)
-    words_list = cleaned_t.split()
-    if norm_w in words_list:
-        return 2  # पूरा शब्द हूबहू मिला (जैसे 'रात')
-    if norm_w in norm_t:
-        return 1  # शब्द का हिस्सा मिला (जैसे 'रातों')
-    return 0
+    cleaned = re.sub(r'[,।\|\-\(\)\[\]\!\?\"\'\~0-9\.:;]', ' ', norm_t)
+    return cleaned.split()
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.create_function("NORM_HI", 1, normalize_hindi)
-    conn.create_function("WORD_SCORE", 2, has_exact_word)
     return conn
-
-def get_table_columns(conn, table_name):
-    try:
-        cols = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return {c[1] for c in cols}
-    except:
-        return set()
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -79,11 +62,15 @@ HTML_TEMPLATE = """
         .section-title { font-size: 1.3rem; margin-bottom: 16px; color: #1e293b; border-left: 4px solid #f59e0b; padding-left: 10px; }
         .song-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
         .song-card { background: white; padding: 16px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
-        .song-id { font-size: 0.75rem; color: #64748b; font-family: monospace; }
-        .song-title { font-size: 1.15rem; font-weight: bold; color: #0f172a; margin: 4px 0; }
+        .song-id { font-size: 0.75rem; color: #64748b; font-family: monospace; display: flex; justify-content: space-between; align-items: center; }
+        .pos-badge { padding: 2px 8px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; font-family: sans-serif; }
+        .pos-start { background: #dcfce7; color: #166534; }
+        .pos-mukhda { background: #fef3c7; color: #92400e; }
+        .pos-other { background: #e0f2fe; color: #075985; }
+        .song-title { font-size: 1.15rem; font-weight: bold; color: #0f172a; margin: 6px 0 4px; }
         .song-lines { font-size: 0.88rem; color: #334155; margin: 6px 0; font-style: italic; }
         .song-meta { font-size: 0.9rem; color: #475569; margin-top: 6px; }
-        .badge { display: inline-block; background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; margin-top: 8px; }
+        .badge { display: inline-block; background: #f1f5f9; color: #475569; padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; margin-top: 8px; }
         .yt-link { display: inline-block; margin-top: 10px; color: #dc2626; font-weight: 600; text-decoration: none; font-size: 0.9rem; }
         footer { text-align: center; padding: 24px; color: #64748b; font-size: 0.9rem; margin-top: 48px; border-top: 1px solid #e2e8f0; }
     </style>
@@ -128,7 +115,16 @@ HTML_TEMPLATE = """
             <div class="song-grid">
                 {% for song in songs %}
                 <div class="song-card">
-                    <div class="song-id">{{ song['song_id'] }} • {{ song['release_year'] or 'N/A' }}</div>
+                    <div class="song-id">
+                        <span>{{ song['song_id'] }} • {{ song['release_year'] or 'N/A' }}</span>
+                        {% if song['match_pos'] == 'start' %}
+                            <span class="pos-badge pos-start">🟢 {{ 'शुरुआत में है' if lang == 'hi' else 'Starts with' }}</span>
+                        {% elif song['match_pos'] == 'mukhda' %}
+                            <span class="pos-badge pos-mukhda">🟡 {{ 'मुखड़े में है' if lang == 'hi' else 'In Mukhda' }}</span>
+                        {% elif song['match_pos'] == 'other' %}
+                            <span class="pos-badge pos-other">🔵 {{ 'फिल्म / कलाकार' if lang == 'hi' else 'Movie / Artist' }}</span>
+                        {% endif %}
+                    </div>
                     <div class="song-title">
                         {{ song['song_title_hindi'] if (lang == 'hi' and song['song_title_hindi']) else (song['song_title_english'] or song['song_title_hindi']) }}
                     </div>
@@ -171,57 +167,77 @@ HTML_TEMPLATE = """
 
 def fetch_songs(query=''):
     conn = get_db_connection()
-    song_cols = get_table_columns(conn, 'songs')
-
-    search_fields = [
-        'song_title_hindi', 'song_title_english', 'alternate_title',
-        'opening_lines_hindi', 'opening_lines_english',
-        'movie_name_hindi', 'singer', 'lyricist', 'music_director', 'actor', 'actress'
-    ]
-    valid_fields = [f for f in search_fields if f in song_cols]
-
-    if query:
-        q_clean = query.strip()
-        norm_q = f"%{normalize_hindi(q_clean)}%"
-        raw_q = f"%{q_clean}%"
-        
-        conditions = []
-        where_params = []
-        for field in valid_fields:
-            conditions.append(f"NORM_HI({field}) LIKE ?")
-            where_params.append(norm_q)
-            conditions.append(f"{field} LIKE ?")
-            where_params.append(raw_q)
-
-        # सटीक पूरे शब्द (Exact Word) को सबसे ऊपर दिखाने के लिए स्कोर जोड़ना
-        sql = f"""
-            SELECT song_id, song_title_hindi, song_title_english,
-                   opening_lines_hindi, opening_lines_english,
-                   release_year, era, youtube_link,
-                   movie_name_hindi AS movie_name, singer,
-                   (WORD_SCORE(song_title_hindi, ?) * 3 +
-                    WORD_SCORE(opening_lines_hindi, ?) * 2 +
-                    WORD_SCORE(song_title_english, ?) +
-                    WORD_SCORE(opening_lines_english, ?)) AS relevance
-            FROM songs
-            WHERE {" OR ".join(conditions)}
-            ORDER BY relevance DESC, song_id ASC
-        """
-        params = [q_clean, q_clean, q_clean, q_clean] + where_params
-    else:
-        sql = """
-            SELECT song_id, song_title_hindi, song_title_english,
-                   opening_lines_hindi, opening_lines_english,
-                   release_year, era, youtube_link,
-                   movie_name_hindi AS movie_name, singer
-            FROM songs
-            ORDER BY song_id ASC LIMIT 30
-        """
-        params = []
-
-    songs = conn.execute(sql, params).fetchall()
+    rows = conn.execute("""
+        SELECT song_id, song_title_hindi, song_title_english,
+               opening_lines_hindi, opening_lines_english,
+               release_year, era, youtube_link,
+               movie_name_hindi AS movie_name,
+               singer, lyricist, music_director, actor, actress
+        FROM songs
+        ORDER BY song_id ASC
+    """).fetchall()
     conn.close()
-    return songs
+
+    if not query:
+        res = []
+        for r in rows[:30]:
+            d = dict(r)
+            d['match_pos'] = ''
+            res.append(d)
+        return res
+
+    q_clean = query.strip()
+    norm_q = normalize_hindi(q_clean)
+    q_words = extract_words(q_clean)
+    hindi_input = is_devanagari(q_clean)
+
+    start_matches = []
+    mukhda_matches = []
+    other_matches = []
+
+    for r in rows:
+        d = dict(r)
+        hi_full = normalize_hindi(d['opening_lines_hindi'] or d['song_title_hindi'] or '')
+        en_full = normalize_hindi(d['opening_lines_english'] or d['song_title_english'] or '')
+        
+        hi_words = extract_words(hi_full)
+        en_words = extract_words(en_full)
+
+        if hi_full.startswith(norm_q) or en_full.startswith(norm_q):
+            if len(q_words) == 1:
+                if (hi_words and hi_words[0] == q_words[0]) or (en_words and en_words[0] == q_words[0]):
+                    d['match_pos'] = 'start'
+                    start_matches.append(d)
+                    continue
+            else:
+                d['match_pos'] = 'start'
+                start_matches.append(d)
+                continue
+
+        if len(q_words) == 1:
+            target_w = q_words[0]
+            if hindi_input:
+                in_mukhda = (target_w in hi_words)
+            else:
+                in_mukhda = (target_w in en_words) or (target_w in hi_words)
+        else:
+            in_mukhda = (norm_q in hi_full) if hindi_input else ((norm_q in en_full) or (norm_q in hi_full))
+
+        if in_mukhda:
+            d['match_pos'] = 'mukhda'
+            mukhda_matches.append(d)
+            continue
+
+        meta_text = normalize_hindi(" ".join([
+            d['movie_name'] or '', d['singer'] or '',
+            d['actor'] or '', d['actress'] or '',
+            d['lyricist'] or '', d['music_director'] or ''
+        ]))
+        if norm_q in meta_text:
+            d['match_pos'] = 'other'
+            other_matches.append(d)
+
+    return start_matches + mukhda_matches + other_matches
 
 @app.route('/')
 def root():
